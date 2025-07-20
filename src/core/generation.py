@@ -20,6 +20,7 @@ import os
 import gc
 import torch
 import time
+import math
 from torchvision.transforms import Compose, Lambda, Normalize
 
 
@@ -46,7 +47,26 @@ from src.data.image.transforms.na_resize import NaResize
 
 from src.utils.color_fix import wavelet_reconstruction
 
-
+def get_adaptive_noise_scale(h, w):
+    """
+    Adaptive noise scaling that:
+    - Preserves original behavior for small resolutions
+    - Gradually increases noise for larger resolutions
+    """
+    current_blocks = h * w
+    threshold_start = 8100
+    
+    if current_blocks <= threshold_start:
+        return 0.0
+    
+    # How much we exceed the threshold (0 to infinity)
+    excess_ratio = (current_blocks - threshold_start) / threshold_start
+    
+    # Square root for very gentle scaling
+    noise_scale = 0.03 * math.sqrt(excess_ratio)
+    
+    # Cap at reasonable maximum
+    return min(noise_scale, 0.20)
 
 def generation_step(runner, text_embeds_dict, preserve_vram, cond_latents, temporal_overlap):
     """
@@ -99,7 +119,14 @@ def generation_step(runner, text_embeds_dict, preserve_vram, cond_latents, tempo
     # Move tensors with adaptive dtype (optimized for FP8/FP16/BFloat16)
     noises, aug_noises, cond_latents = _move_to_cuda(noises), _move_to_cuda(aug_noises), _move_to_cuda(cond_latents)
     
-    cond_noise_scale = 0.0
+    # Adaptive noise to avoid artifacts above 1080p upscale
+    cond_noise_scale = get_adaptive_noise_scale(
+        cond_latents[0].shape[1], 
+        cond_latents[0].shape[2]
+    )
+
+    if cond_noise_scale > 0:
+        print(f"📊 Adaptive noise scale: {cond_noise_scale:.3f} for {cond_latents[0].shape[1]}×{cond_latents[0].shape[2]} latent")
 
     def _add_noise(x, aug_noise):
         # Use adaptive optimal dtype
